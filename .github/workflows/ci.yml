@@ -22,6 +22,9 @@ jobs:
           go-version: "1.26.3"
           cache: true
 
+      - name: Setup dependencies
+        run: bash .github/scripts/setup-deps.sh
+
       - name: Build
         run: go build -v ./...
 
@@ -35,6 +38,9 @@ jobs:
         with:
           go-version: "1.26.3"
           cache: true
+
+      - name: Setup dependencies
+        run: bash .github/scripts/setup-deps.sh
 
       - name: Run unit tests
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
@@ -53,6 +59,9 @@ jobs:
           go-version: "1.26.3"
           cache: true
 
+      - name: Setup dependencies
+        run: bash .github/scripts/setup-deps.sh
+
       - name: go vet
         run: go vet ./...
 
@@ -61,11 +70,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.3"
-          cache: true
 
       - name: Check formatting
         run: |
@@ -85,6 +89,9 @@ jobs:
         with:
           go-version: "1.26.3"
           cache: true
+
+      - name: Setup dependencies
+        run: bash .github/scripts/setup-deps.sh
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest

@@ -26,12 +26,12 @@ const (
 
 // Client implements the connector.Connector interface for Bybit.
 type Client struct {
-	apiKey     string
-	apiSecret  string
-	baseURL    string
-	httpClient *http.Client
+	apiKey      string
+	apiSecret   string
+	baseURL     string
+	httpClient  *http.Client
 	rateLimiter *RateLimiter
-	testnet    bool
+	testnet     bool
 }
 
 // Config contains Bybit connector configuration.

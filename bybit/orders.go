@@ -114,20 +114,20 @@ func (c *Client) CancelOrder(ctx context.Context, orderID string) error {
 
 // QueryOrderResponse represents an order query response.
 type QueryOrderResponse struct {
-	OrderID       string `json:"orderId"`
-	OrderLinkID   string `json:"orderLinkId"`
-	Symbol        string `json:"symbol"`
-	Side          string `json:"side"`
-	OrderType     string `json:"orderType"`
-	Price         string `json:"price"`
-	Qty           string `json:"qty"`
-	CumExecQty    string `json:"cumExecQty"`
-	LeavesQty     string `json:"leavesQty"`
-	AvgPrice      string `json:"avgPrice"`
-	OrderStatus   string `json:"orderStatus"`
-	TimeInForce   string `json:"timeInForce"`
-	CreatedTime   string `json:"createdTime"`
-	UpdatedTime   string `json:"updatedTime"`
+	OrderID     string `json:"orderId"`
+	OrderLinkID string `json:"orderLinkId"`
+	Symbol      string `json:"symbol"`
+	Side        string `json:"side"`
+	OrderType   string `json:"orderType"`
+	Price       string `json:"price"`
+	Qty         string `json:"qty"`
+	CumExecQty  string `json:"cumExecQty"`
+	LeavesQty   string `json:"leavesQty"`
+	AvgPrice    string `json:"avgPrice"`
+	OrderStatus string `json:"orderStatus"`
+	TimeInForce string `json:"timeInForce"`
+	CreatedTime string `json:"createdTime"`
+	UpdatedTime string `json:"updatedTime"`
 }
 
 // QueryOrder retrieves the current status of an order from the exchange.
@@ -245,4 +245,3 @@ func unmapTimeInForce(tif string) connector.TimeInForce {
 		return connector.TimeInForceGTC
 	}
 }
-

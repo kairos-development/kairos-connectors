@@ -88,9 +88,9 @@ func (c *Client) GetSymbol(ctx context.Context, symbol string) (*connector.Symbo
 	sym.TickSize, _ = decimal.NewFromString(instResp.PriceFilter.TickSize)
 
 	// Default values for fees and min notional
-	sym.MakerFee = decimal.NewFromFloat(0.0001)  // 0.01%
-	sym.TakerFee = decimal.NewFromFloat(0.0006)  // 0.06%
-	sym.MinNotional = decimal.NewFromInt(10)     // $10 minimum
+	sym.MakerFee = decimal.NewFromFloat(0.0001) // 0.01%
+	sym.TakerFee = decimal.NewFromFloat(0.0006) // 0.06%
+	sym.MinNotional = decimal.NewFromInt(10)    // $10 minimum
 
 	return sym, nil
 }

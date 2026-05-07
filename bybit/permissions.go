@@ -21,11 +21,11 @@ type APIResponse struct {
 
 // PermissionsResponse represents the API key permissions response.
 type PermissionsResponse struct {
-	ID          string   `json:"id"`
-	Note        string   `json:"note"`
-	APIKey      string   `json:"apiKey"`
-	ReadOnly    int      `json:"readOnly"`
-	Secret      string   `json:"secret"`
+	ID          string `json:"id"`
+	Note        string `json:"note"`
+	APIKey      string `json:"apiKey"`
+	ReadOnly    int    `json:"readOnly"`
+	Secret      string `json:"secret"`
 	Permissions struct {
 		ContractTrade []string `json:"ContractTrade"`
 		Spot          []string `json:"Spot"`
@@ -34,18 +34,18 @@ type PermissionsResponse struct {
 		Derivatives   []string `json:"Derivatives"`
 		Exchange      []string `json:"Exchange"`
 	} `json:"permissions"`
-	IPs        []string `json:"ips"`
-	Type       int      `json:"type"`
-	DeadlineAt int64    `json:"deadlineDay"`
-	ExpiredAt  int64    `json:"expiredAt"`
-	CreatedAt  int64    `json:"createdAt"`
-	Unified    int      `json:"unified"`
-	UTA        int      `json:"uta"`
-	UserID     int      `json:"userID"`
-	InviterID  int      `json:"inviterID"`
-	VipLevel   string   `json:"vipLevel"`
-	MktMakerLevel string `json:"mktMakerLevel"`
-	AffiliateID int      `json:"affiliateID"`
+	IPs           []string `json:"ips"`
+	Type          int      `json:"type"`
+	DeadlineAt    int64    `json:"deadlineDay"`
+	ExpiredAt     int64    `json:"expiredAt"`
+	CreatedAt     int64    `json:"createdAt"`
+	Unified       int      `json:"unified"`
+	UTA           int      `json:"uta"`
+	UserID        int      `json:"userID"`
+	InviterID     int      `json:"inviterID"`
+	VipLevel      string   `json:"vipLevel"`
+	MktMakerLevel string   `json:"mktMakerLevel"`
+	AffiliateID   int      `json:"affiliateID"`
 }
 
 // CheckPermissions verifies API key permissions.
@@ -79,8 +79,8 @@ func (c *Client) CheckPermissions(ctx context.Context) (*connector.Permissions, 
 
 	// Parse permissions
 	perms := &connector.Permissions{
-		CanRead:  permResp.ReadOnly == 0, // ReadOnly=0 means full access
-		CanTrade: false,
+		CanRead:     permResp.ReadOnly == 0, // ReadOnly=0 means full access
+		CanTrade:    false,
 		HasWithdraw: false,
 		HasTransfer: false,
 	}

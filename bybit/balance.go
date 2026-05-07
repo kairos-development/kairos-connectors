@@ -17,10 +17,10 @@ import (
 type BalanceResponse struct {
 	AccountType string `json:"accountType"`
 	Coin        []struct {
-		Coin            string `json:"coin"`
-		WalletBalance   string `json:"walletBalance"`
+		Coin             string `json:"coin"`
+		WalletBalance    string `json:"walletBalance"`
 		AvailableBalance string `json:"availableToWithdraw"`
-		Locked          string `json:"locked"`
+		Locked           string `json:"locked"`
 	} `json:"coin"`
 }
 

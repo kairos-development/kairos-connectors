@@ -14,16 +14,16 @@ import (
 
 // PositionResponse represents a position query response.
 type PositionResponse struct {
-	Symbol        string `json:"symbol"`
-	Side          string `json:"side"`
-	Size          string `json:"size"`
-	PositionValue string `json:"positionValue"`
-	EntryPrice    string `json:"avgPrice"`
-	MarkPrice     string `json:"markPrice"`
-	UnrealisedPnl string `json:"unrealisedPnl"`
+	Symbol         string `json:"symbol"`
+	Side           string `json:"side"`
+	Size           string `json:"size"`
+	PositionValue  string `json:"positionValue"`
+	EntryPrice     string `json:"avgPrice"`
+	MarkPrice      string `json:"markPrice"`
+	UnrealisedPnl  string `json:"unrealisedPnl"`
 	CumRealisedPnl string `json:"cumRealisedPnl"`
-	CreatedTime   string `json:"createdTime"`
-	UpdatedTime   string `json:"updatedTime"`
+	CreatedTime    string `json:"createdTime"`
+	UpdatedTime    string `json:"updatedTime"`
 }
 
 // GetPosition retrieves the current position for a symbol.
@@ -84,4 +84,3 @@ func (c *Client) GetPosition(ctx context.Context, symbol string) (*connector.Pos
 
 	return position, nil
 }
-
