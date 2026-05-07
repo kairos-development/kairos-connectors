@@ -8,3 +8,7 @@ git clone --depth 1 https://github.com/kairos-development/kairos-contracts.git "
 sed -i "s|../kairos-contracts|$DEPS_DIR/kairos-contracts|g" go.mod
 
 echo "Dependencies cloned to $DEPS_DIR"
+echo "go.mod replace:"
+grep "replace" go.mod
+
+go mod tidy
