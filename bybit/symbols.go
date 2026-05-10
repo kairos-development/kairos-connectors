@@ -79,18 +79,30 @@ func (c *Client) GetSymbol(ctx context.Context, symbol string) (*connector.Symbo
 		UpdatedAtUTC:  time.Now().UTC(),
 	}
 
-	sym.MinOrderQty, _ = decimal.NewFromString(instResp.LotSizeFilter.MinOrderQty)
-	sym.MaxOrderQty, _ = decimal.NewFromString(instResp.LotSizeFilter.MaxOrderQty)
-	sym.StepSize, _ = decimal.NewFromString(instResp.LotSizeFilter.QtyStep)
+	if sym.MinOrderQty, err = parseRequiredDecimal("minOrderQty", instResp.LotSizeFilter.MinOrderQty); err != nil {
+		return nil, err
+	}
+	if sym.MaxOrderQty, err = parseRequiredDecimal("maxOrderQty", instResp.LotSizeFilter.MaxOrderQty); err != nil {
+		return nil, err
+	}
+	if sym.StepSize, err = parseRequiredDecimal("qtyStep", instResp.LotSizeFilter.QtyStep); err != nil {
+		return nil, err
+	}
 
-	sym.MinPrice, _ = decimal.NewFromString(instResp.PriceFilter.MinPrice)
-	sym.MaxPrice, _ = decimal.NewFromString(instResp.PriceFilter.MaxPrice)
-	sym.TickSize, _ = decimal.NewFromString(instResp.PriceFilter.TickSize)
+	if sym.MinPrice, err = parseRequiredDecimal("minPrice", instResp.PriceFilter.MinPrice); err != nil {
+		return nil, err
+	}
+	if sym.MaxPrice, err = parseRequiredDecimal("maxPrice", instResp.PriceFilter.MaxPrice); err != nil {
+		return nil, err
+	}
+	if sym.TickSize, err = parseRequiredDecimal("tickSize", instResp.PriceFilter.TickSize); err != nil {
+		return nil, err
+	}
 
-	// Default values for fees and min notional
-	sym.MakerFee = decimal.NewFromFloat(0.0001) // 0.01%
-	sym.TakerFee = decimal.NewFromFloat(0.0006) // 0.06%
-	sym.MinNotional = decimal.NewFromInt(10)    // $10 minimum
+	// Default values for fees and min notional are exact decimal constants.
+	sym.MakerFee = decimal.NewFromInt(1).Shift(-4) // 0.01%
+	sym.TakerFee = decimal.NewFromInt(6).Shift(-4) // 0.06%
+	sym.MinNotional = decimal.NewFromInt(10)       // $10 minimum
 
 	return sym, nil
 }

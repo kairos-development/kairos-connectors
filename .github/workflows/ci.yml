@@ -74,6 +74,15 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+  quality-gates:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run connector quality gates
+        run: bash .github/scripts/quality-gates.sh
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

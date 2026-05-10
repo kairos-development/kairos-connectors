@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/kairos-development/kairos-contracts/connector"
-	"github.com/shopspring/decimal"
 )
 
 // BalanceResponse represents a balance query response.
@@ -67,9 +66,18 @@ func (c *Client) GetBalance(ctx context.Context) (*connector.AccountBalance, err
 	balances := make([]connector.Balance, 0, len(balResp.Coin))
 
 	for _, coin := range balResp.Coin {
-		total, _ := decimal.NewFromString(coin.WalletBalance)
-		available, _ := decimal.NewFromString(coin.AvailableBalance)
-		locked, _ := decimal.NewFromString(coin.Locked)
+		total, err := parseRequiredDecimal("walletBalance", coin.WalletBalance)
+		if err != nil {
+			return nil, err
+		}
+		available, err := parseOptionalDecimal("availableToWithdraw", coin.AvailableBalance)
+		if err != nil {
+			return nil, err
+		}
+		locked, err := parseOptionalDecimal("locked", coin.Locked)
+		if err != nil {
+			return nil, err
+		}
 
 		// Skip zero balances
 		if total.IsZero() {

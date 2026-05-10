@@ -9,7 +9,6 @@ import (
 	"net/url"
 
 	"github.com/kairos-development/kairos-contracts/connector"
-	"github.com/shopspring/decimal"
 )
 
 // GetPositions retrieves all positions for the account.
@@ -47,7 +46,10 @@ func (c *Client) GetPositions(ctx context.Context) ([]*connector.Position, error
 	positions := make([]*connector.Position, 0, len(result.List))
 
 	for _, posResp := range result.List {
-		qty, _ := decimal.NewFromString(posResp.Size)
+		qty, err := parseRequiredDecimal("size", posResp.Size)
+		if err != nil {
+			return nil, err
+		}
 
 		// Skip flat positions
 		if qty.IsZero() {
@@ -60,10 +62,18 @@ func (c *Client) GetPositions(ctx context.Context) ([]*connector.Position, error
 		}
 
 		position.Quantity = qty
-		position.EntryPrice, _ = decimal.NewFromString(posResp.EntryPrice)
-		position.CurrentPrice, _ = decimal.NewFromString(posResp.MarkPrice)
-		position.UnrealizedPnL, _ = decimal.NewFromString(posResp.UnrealisedPnl)
-		position.RealizedPnL, _ = decimal.NewFromString(posResp.CumRealisedPnl)
+		if position.EntryPrice, err = parseOptionalDecimal("avgPrice", posResp.EntryPrice); err != nil {
+			return nil, err
+		}
+		if position.CurrentPrice, err = parseOptionalDecimal("markPrice", posResp.MarkPrice); err != nil {
+			return nil, err
+		}
+		if position.UnrealizedPnL, err = parseOptionalDecimal("unrealisedPnl", posResp.UnrealisedPnl); err != nil {
+			return nil, err
+		}
+		if position.RealizedPnL, err = parseOptionalDecimal("cumRealisedPnl", posResp.CumRealisedPnl); err != nil {
+			return nil, err
+		}
 
 		positions = append(positions, position)
 	}

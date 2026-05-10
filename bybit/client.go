@@ -1,11 +1,13 @@
 package bybit
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -164,18 +166,23 @@ func (c *Client) doRequest(ctx context.Context, method, path string, params url.
 		reqURL += "?" + params.Encode()
 	}
 
+	var bodyReader io.Reader
+	payload := ""
+	if len(body) > 0 {
+		payload = string(body)
+		bodyReader = bytes.NewReader(body)
+	} else if len(params) > 0 {
+		payload = params.Encode()
+	}
+
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, method, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	// Add authentication headers
-	paramsStr := ""
-	if len(params) > 0 {
-		paramsStr = params.Encode()
-	}
-	headers := c.buildAuthHeaders(paramsStr)
+	headers := c.buildAuthHeaders(payload)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

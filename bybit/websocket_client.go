@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	connectorpkg "github.com/kairos-development/kairos-contracts/connector"
 	"github.com/sirupsen/logrus"
 )
 
@@ -28,7 +29,8 @@ type WebSocketConfig struct {
 
 // WebSocketClient manages WebSocket connections to Bybit.
 type WebSocketClient struct {
-	mu sync.RWMutex
+	mu      sync.RWMutex
+	writeMu sync.Mutex
 
 	conn      *websocket.Conn
 	url       string
@@ -36,12 +38,21 @@ type WebSocketClient struct {
 	apiSecret string
 	logger    *logrus.Logger
 
-	connected bool
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	connected     bool
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	closeOnce     sync.Once
+	pingOnce      sync.Once
+	reconnectOnce sync.Once
+
+	reconnectCh           chan struct{}
+	reconnectInitialDelay time.Duration
+	reconnectMaxDelay     time.Duration
+	subscriptions         map[string]struct{}
 
 	messages chan *WebSocketMessage
+	events   chan *connectorpkg.StreamEvent
 }
 
 // WebSocketMessage represents a parsed WebSocket message.
@@ -64,26 +75,45 @@ func NewWebSocketClient(cfg WebSocketConfig, logger *logrus.Logger) (*WebSocketC
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &WebSocketClient{
-		url:       url,
-		apiKey:    cfg.APIKey,
-		apiSecret: cfg.APISecret,
-		logger:    logger,
-		ctx:       ctx,
-		cancel:    cancel,
-		messages:  make(chan *WebSocketMessage, 100),
+		url:                   url,
+		apiKey:                cfg.APIKey,
+		apiSecret:             cfg.APISecret,
+		logger:                logger,
+		ctx:                   ctx,
+		cancel:                cancel,
+		reconnectCh:           make(chan struct{}, 1),
+		reconnectInitialDelay: time.Second,
+		reconnectMaxDelay:     30 * time.Second,
+		subscriptions:         make(map[string]struct{}),
+		messages:              make(chan *WebSocketMessage, 100),
+		events:                make(chan *connectorpkg.StreamEvent, 100),
 	}, nil
 }
 
 // Connect establishes WebSocket connection and authenticates.
 func (ws *WebSocketClient) Connect(ctx context.Context) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
-	if ws.connected {
-		return nil
+	if ws.ctx.Err() != nil {
+		return context.Canceled
 	}
 
-	// Establish connection
+	ws.mu.Lock()
+	if ws.connected {
+		ws.mu.Unlock()
+		return nil
+	}
+	err := ws.connectLocked(ctx)
+	ws.mu.Unlock()
+
+	if err != nil {
+		return err
+	}
+
+	ws.startBackgroundLoops()
+	ws.logger.Info("WebSocket connected and authenticated")
+	return nil
+}
+
+func (ws *WebSocketClient) connectLocked(ctx context.Context) error {
 	dialer := websocket.DefaultDialer
 	conn, _, err := dialer.DialContext(ctx, ws.url, nil)
 	if err != nil {
@@ -95,43 +125,152 @@ func (ws *WebSocketClient) Connect(ctx context.Context) error {
 	// Authenticate
 	if err := ws.authenticate(); err != nil {
 		conn.Close()
+		ws.conn = nil
 		return fmt.Errorf("authenticate: %w", err)
 	}
 
 	ws.connected = true
 
-	// Start message handler
-	ws.wg.Add(2)
-	go ws.readLoop()
-	go ws.pingLoop()
-
-	ws.logger.Info("WebSocket connected and authenticated")
+	ws.wg.Add(1)
+	go ws.readLoop(conn)
 
 	return nil
 }
 
+func (ws *WebSocketClient) startBackgroundLoops() {
+	ws.pingOnce.Do(func() {
+		ws.wg.Add(1)
+		go ws.pingLoop()
+	})
+	ws.reconnectOnce.Do(func() {
+		ws.wg.Add(1)
+		go ws.reconnectLoop()
+	})
+}
+
 // Close closes the WebSocket connection.
 func (ws *WebSocketClient) Close() error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	var err error
+	ws.closeOnce.Do(func() {
+		ws.mu.Lock()
+		ws.connected = false
+		ws.cancel()
+		conn := ws.conn
+		ws.conn = nil
+		ws.mu.Unlock()
 
-	if !ws.connected {
-		return nil
+		if conn != nil {
+			err = conn.Close()
+		}
+
+		ws.wg.Wait()
+		close(ws.messages)
+		close(ws.events)
+
+		ws.logger.Info("WebSocket closed")
+	})
+	if err != nil {
+		return fmt.Errorf("close websocket: %w", err)
 	}
-
-	ws.connected = false
-	ws.cancel()
-
-	if ws.conn != nil {
-		ws.conn.Close()
-	}
-
-	ws.wg.Wait()
-	close(ws.messages)
-
-	ws.logger.Info("WebSocket closed")
-
 	return nil
+}
+
+func (ws *WebSocketClient) writeJSON(v interface{}) error {
+	ws.mu.RLock()
+	conn := ws.conn
+	connected := ws.connected
+	ws.mu.RUnlock()
+
+	if conn == nil || !connected {
+		return fmt.Errorf("not connected")
+	}
+
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetWriteDeadline(time.Time{})
+	return conn.WriteJSON(v)
+}
+
+func (ws *WebSocketClient) writeJSONTo(conn *websocket.Conn, v interface{}) error {
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetWriteDeadline(time.Time{})
+	return conn.WriteJSON(v)
+}
+
+func (ws *WebSocketClient) markDisconnected(conn *websocket.Conn, reason string) {
+	shouldPublish := false
+
+	ws.mu.Lock()
+	if ws.conn == conn {
+		ws.connected = false
+		ws.conn = nil
+		shouldPublish = true
+	}
+	ws.mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+
+	if shouldPublish {
+		ws.publishStreamEvent(connectorpkg.StreamEventDisconnected, reason)
+	}
+}
+
+func (ws *WebSocketClient) disconnectCurrent(reason string) {
+	shouldPublish := false
+
+	ws.mu.Lock()
+	conn := ws.conn
+	if ws.connected || ws.conn != nil {
+		shouldPublish = true
+	}
+	ws.connected = false
+	ws.conn = nil
+	ws.mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+
+	if shouldPublish {
+		ws.publishStreamEvent(connectorpkg.StreamEventDisconnected, reason)
+	}
+}
+
+func (ws *WebSocketClient) triggerReconnect() {
+	select {
+	case <-ws.ctx.Done():
+		return
+	case ws.reconnectCh <- struct{}{}:
+	default:
+	}
+}
+
+func (ws *WebSocketClient) publishStreamEvent(eventType connectorpkg.StreamEventType, reason string) {
+	event := &connectorpkg.StreamEvent{
+		Type:          eventType,
+		Source:        "bybit_private_ws",
+		Reason:        reason,
+		OccurredAtUTC: time.Now().UTC(),
+	}
+
+	select {
+	case ws.events <- event:
+	case <-ws.ctx.Done():
+	default:
+		ws.logger.WithFields(logrus.Fields{
+			"type":   eventType,
+			"reason": reason,
+		}).Warn("WebSocket stream event channel full, dropping event")
+	}
 }
 
 // authenticate sends authentication message to Bybit WebSocket.
@@ -148,6 +287,8 @@ func (ws *WebSocketClient) authenticate() error {
 		},
 	}
 
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
 	return ws.conn.WriteJSON(authMsg)
 }
 
@@ -181,23 +322,40 @@ func (ws *WebSocketClient) SubscribeTicker(ctx context.Context, symbol string) e
 
 // subscribe sends a subscription message for a topic.
 func (ws *WebSocketClient) subscribe(topic string) error {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	if ws.ctx.Err() != nil {
+		return context.Canceled
+	}
 
-	if !ws.connected {
+	ws.mu.Lock()
+	ws.subscriptions[topic] = struct{}{}
+	conn := ws.conn
+	connected := ws.connected
+	ws.mu.Unlock()
+
+	if !connected || conn == nil {
 		return fmt.Errorf("not connected")
 	}
 
+	if err := ws.sendSubscription(conn, topic); err != nil {
+		ws.publishStreamEvent(connectorpkg.StreamEventGap, fmt.Sprintf("subscription write failed for %s: %v", topic, err))
+		ws.markDisconnected(conn, fmt.Sprintf("subscription write failed for %s", topic))
+		ws.triggerReconnect()
+		return err
+	}
+
+	ws.logger.WithField("topic", topic).Debug("Subscribed to topic")
+	return nil
+}
+
+func (ws *WebSocketClient) sendSubscription(conn *websocket.Conn, topic string) error {
 	subMsg := map[string]interface{}{
 		"op":   "subscribe",
 		"args": []string{topic},
 	}
 
-	if err := ws.conn.WriteJSON(subMsg); err != nil {
+	if err := ws.writeJSONTo(conn, subMsg); err != nil {
 		return fmt.Errorf("send subscription: %w", err)
 	}
-
-	ws.logger.WithField("topic", topic).Debug("Subscribed to topic")
 
 	return nil
 }
@@ -207,8 +365,13 @@ func (ws *WebSocketClient) Messages() <-chan *WebSocketMessage {
 	return ws.messages
 }
 
+// Events returns the channel for receiving WebSocket lifecycle events.
+func (ws *WebSocketClient) Events() <-chan *connectorpkg.StreamEvent {
+	return ws.events
+}
+
 // readLoop reads messages from WebSocket connection.
-func (ws *WebSocketClient) readLoop() {
+func (ws *WebSocketClient) readLoop(conn *websocket.Conn) {
 	defer ws.wg.Done()
 
 	for {
@@ -216,10 +379,6 @@ func (ws *WebSocketClient) readLoop() {
 		case <-ws.ctx.Done():
 			return
 		default:
-			ws.mu.RLock()
-			conn := ws.conn
-			ws.mu.RUnlock()
-
 			if conn == nil {
 				return
 			}
@@ -231,7 +390,10 @@ func (ws *WebSocketClient) readLoop() {
 				case <-ws.ctx.Done():
 					return
 				default:
+					ws.publishStreamEvent(connectorpkg.StreamEventGap, fmt.Sprintf("read error: %v", err))
+					ws.markDisconnected(conn, "read error")
 					ws.logger.WithError(err).Warn("WebSocket read error")
+					ws.triggerReconnect()
 					return
 				}
 			}
@@ -301,16 +463,105 @@ func (ws *WebSocketClient) pingLoop() {
 		case <-ws.ctx.Done():
 			return
 		case <-ticker.C:
-			ws.mu.RLock()
-			if ws.connected && ws.conn != nil {
-				pingMsg := map[string]interface{}{
-					"op": "ping",
-				}
-				if err := ws.conn.WriteJSON(pingMsg); err != nil {
-					ws.logger.WithError(err).Debug("Failed to send ping")
-				}
+			pingMsg := map[string]interface{}{
+				"op": "ping",
 			}
-			ws.mu.RUnlock()
+			if err := ws.writeJSON(pingMsg); err != nil {
+				ws.logger.WithError(err).Debug("Failed to send ping")
+				ws.publishStreamEvent(connectorpkg.StreamEventGap, fmt.Sprintf("ping failed: %v", err))
+				ws.disconnectCurrent("ping failed")
+				ws.triggerReconnect()
+			}
 		}
 	}
+}
+
+func (ws *WebSocketClient) reconnectLoop() {
+	defer ws.wg.Done()
+
+	for {
+		select {
+		case <-ws.ctx.Done():
+			return
+		case <-ws.reconnectCh:
+			ws.reconnectUntilSuccess()
+		}
+	}
+}
+
+func (ws *WebSocketClient) reconnectUntilSuccess() {
+	delay := time.Duration(0)
+
+	for {
+		if delay > 0 {
+			ws.logger.WithField("delay", delay.String()).Info("Waiting before WebSocket reconnect")
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ws.ctx.Done():
+				timer.Stop()
+				return
+			}
+		}
+
+		reconnected, err := ws.reconnectOnceAttempt()
+		if err != nil {
+			ws.logger.WithError(err).Warn("WebSocket reconnect failed")
+			if delay == 0 {
+				delay = ws.reconnectInitialDelay
+			} else {
+				delay *= 2
+			}
+			if delay > ws.reconnectMaxDelay {
+				delay = ws.reconnectMaxDelay
+			}
+			continue
+		}
+
+		if !reconnected {
+			return
+		}
+
+		ws.logger.Info("WebSocket reconnected successfully")
+		ws.publishStreamEvent(connectorpkg.StreamEventReconnected, "websocket reconnect completed")
+		return
+	}
+}
+
+func (ws *WebSocketClient) reconnectOnceAttempt() (bool, error) {
+	ctx, cancel := context.WithTimeout(ws.ctx, 30*time.Second)
+	defer cancel()
+
+	ws.mu.Lock()
+	if ws.connected {
+		ws.mu.Unlock()
+		return false, nil
+	}
+	if err := ws.connectLocked(ctx); err != nil {
+		ws.mu.Unlock()
+		return false, err
+	}
+	topics := make([]string, 0, len(ws.subscriptions))
+	for topic := range ws.subscriptions {
+		topics = append(topics, topic)
+	}
+	conn := ws.conn
+	ws.mu.Unlock()
+
+	for _, topic := range topics {
+		select {
+		case <-ctx.Done():
+			ws.markDisconnected(conn, "resubscribe context canceled")
+			return false, ctx.Err()
+		default:
+		}
+		if err := ws.sendSubscription(conn, topic); err != nil {
+			ws.publishStreamEvent(connectorpkg.StreamEventGap, fmt.Sprintf("resubscribe failed for %s: %v", topic, err))
+			ws.markDisconnected(conn, fmt.Sprintf("resubscribe failed for %s", topic))
+			return false, err
+		}
+		ws.logger.WithField("topic", topic).Debug("Resubscribed to topic")
+	}
+
+	return true, nil
 }

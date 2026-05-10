@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/kairos-development/kairos-contracts/connector"
-	"github.com/shopspring/decimal"
 )
 
 // OrderRequest represents an order placement request.
@@ -182,11 +181,21 @@ func (c *Client) QueryOrder(ctx context.Context, orderID string) (*connector.Ord
 		UpdatedAtUTC:    time.Now().UTC(),
 	}
 
-	order.Quantity, _ = decimal.NewFromString(orderResp.Qty)
-	order.Price, _ = decimal.NewFromString(orderResp.Price)
-	order.FilledQty, _ = decimal.NewFromString(orderResp.CumExecQty)
-	order.RemainingQty, _ = decimal.NewFromString(orderResp.LeavesQty)
-	order.AvgFillPrice, _ = decimal.NewFromString(orderResp.AvgPrice)
+	if order.Quantity, err = parseRequiredDecimal("qty", orderResp.Qty); err != nil {
+		return nil, err
+	}
+	if order.Price, err = parseOptionalDecimal("price", orderResp.Price); err != nil {
+		return nil, err
+	}
+	if order.FilledQty, err = parseOptionalDecimal("cumExecQty", orderResp.CumExecQty); err != nil {
+		return nil, err
+	}
+	if order.RemainingQty, err = parseOptionalDecimal("leavesQty", orderResp.LeavesQty); err != nil {
+		return nil, err
+	}
+	if order.AvgFillPrice, err = parseOptionalDecimal("avgPrice", orderResp.AvgPrice); err != nil {
+		return nil, err
+	}
 
 	return order, nil
 }

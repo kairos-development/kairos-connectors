@@ -20,6 +20,10 @@ type RateLimiter struct {
 
 // NewRateLimiter creates a new rate limiter with the specified rate.
 func NewRateLimiter(requestsPerSecond int) *RateLimiter {
+	if requestsPerSecond <= 0 {
+		requestsPerSecond = 1
+	}
+
 	rl := &RateLimiter{
 		tokens:     requestsPerSecond,
 		maxTokens:  requestsPerSecond,
@@ -38,6 +42,12 @@ func NewRateLimiter(requestsPerSecond int) *RateLimiter {
 // Wait blocks until a token is available or context is canceled.
 func (rl *RateLimiter) Wait(ctx context.Context) error {
 	for {
+		select {
+		case <-rl.stopChan:
+			return context.Canceled
+		default:
+		}
+
 		rl.mu.Lock()
 		if rl.tokens > 0 {
 			rl.tokens--
@@ -50,6 +60,8 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-rl.stopChan:
+			return context.Canceled
 		case <-time.After(100 * time.Millisecond):
 			// Retry
 		}
@@ -58,6 +70,10 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 
 // refillLoop periodically refills tokens.
 func (rl *RateLimiter) refillLoop() {
+	defer func() {
+		_ = recover()
+	}()
+
 	for {
 		select {
 		case <-rl.refillTicker.C:

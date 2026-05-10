@@ -76,11 +76,21 @@ func (c *Client) GetPosition(ctx context.Context, symbol string) (*connector.Pos
 		Side:   unmapPositionSide(posResp.Side),
 	}
 
-	position.Quantity, _ = decimal.NewFromString(posResp.Size)
-	position.EntryPrice, _ = decimal.NewFromString(posResp.EntryPrice)
-	position.CurrentPrice, _ = decimal.NewFromString(posResp.MarkPrice)
-	position.UnrealizedPnL, _ = decimal.NewFromString(posResp.UnrealisedPnl)
-	position.RealizedPnL, _ = decimal.NewFromString(posResp.CumRealisedPnl)
+	if position.Quantity, err = parseRequiredDecimal("size", posResp.Size); err != nil {
+		return nil, err
+	}
+	if position.EntryPrice, err = parseOptionalDecimal("avgPrice", posResp.EntryPrice); err != nil {
+		return nil, err
+	}
+	if position.CurrentPrice, err = parseOptionalDecimal("markPrice", posResp.MarkPrice); err != nil {
+		return nil, err
+	}
+	if position.UnrealizedPnL, err = parseOptionalDecimal("unrealisedPnl", posResp.UnrealisedPnl); err != nil {
+		return nil, err
+	}
+	if position.RealizedPnL, err = parseOptionalDecimal("cumRealisedPnl", posResp.CumRealisedPnl); err != nil {
+		return nil, err
+	}
 
 	return position, nil
 }

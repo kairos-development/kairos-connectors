@@ -3,11 +3,11 @@ package bybit
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/kairos-development/kairos-contracts/connector"
-	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
 
@@ -24,6 +24,7 @@ type Connector struct {
 	orderUpdates    chan *connector.OrderUpdate
 	positionUpdates chan *connector.PositionUpdate
 	balanceUpdates  chan *connector.BalanceUpdate
+	streamEvents    chan *connector.StreamEvent
 	tickerUpdates   map[string]chan *connector.TickerUpdate
 
 	// Shutdown
@@ -54,6 +55,7 @@ func NewConnector(cfg Config, logger *logrus.Logger) (*Connector, error) {
 		orderUpdates:    make(chan *connector.OrderUpdate, 100),
 		positionUpdates: make(chan *connector.PositionUpdate, 100),
 		balanceUpdates:  make(chan *connector.BalanceUpdate, 100),
+		streamEvents:    make(chan *connector.StreamEvent, 100),
 	}, nil
 }
 
@@ -106,6 +108,9 @@ func (c *Connector) Connect(ctx context.Context) error {
 	c.wg.Add(1)
 	go c.handleWebSocketMessages()
 
+	c.wg.Add(1)
+	go c.handleWebSocketEvents()
+
 	c.connected = true
 	c.logger.Info("Bybit connector connected")
 
@@ -115,18 +120,26 @@ func (c *Connector) Connect(ctx context.Context) error {
 // Disconnect gracefully closes all connections.
 func (c *Connector) Disconnect(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if !c.connected {
+		c.mu.Unlock()
 		return nil
 	}
 
+	ws := c.ws
+	tickerChannels := make([]chan *connector.TickerUpdate, 0, len(c.tickerUpdates))
+	for _, ch := range c.tickerUpdates {
+		tickerChannels = append(tickerChannels, ch)
+	}
+
+	c.connected = false
+
 	// Cancel context to stop goroutines
 	c.cancel()
+	c.mu.Unlock()
 
 	// Close WebSocket
-	if c.ws != nil {
-		if err := c.ws.Close(); err != nil {
+	if ws != nil {
+		if err := ws.Close(); err != nil {
 			c.logger.WithError(err).Error("Failed to close WebSocket")
 		}
 	}
@@ -138,12 +151,12 @@ func (c *Connector) Disconnect(ctx context.Context) error {
 	close(c.orderUpdates)
 	close(c.positionUpdates)
 	close(c.balanceUpdates)
+	close(c.streamEvents)
 
-	for _, ch := range c.tickerUpdates {
+	for _, ch := range tickerChannels {
 		close(ch)
 	}
 
-	c.connected = false
 	c.logger.Info("Bybit connector disconnected")
 
 	return nil
@@ -233,6 +246,20 @@ func (c *Connector) GetPosition(ctx context.Context, symbol string) (*connector.
 	}
 
 	return position, nil
+}
+
+// GetPositions retrieves all non-flat positions for the account.
+func (c *Connector) GetPositions(ctx context.Context) ([]*connector.Position, error) {
+	if !c.IsConnected() {
+		return nil, fmt.Errorf("connector not connected")
+	}
+
+	positions, err := c.client.GetPositions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get positions: %w", err)
+	}
+
+	return positions, nil
 }
 
 // GetBalance retrieves the current account balance.
@@ -356,6 +383,15 @@ func (c *Connector) SubscribeTicker(ctx context.Context, symbol string) (<-chan 
 	return ch, nil
 }
 
+// SubscribeStreamEvents subscribes to WebSocket lifecycle events.
+func (c *Connector) SubscribeStreamEvents(ctx context.Context) (<-chan *connector.StreamEvent, error) {
+	if !c.IsConnected() {
+		return nil, fmt.Errorf("connector not connected")
+	}
+
+	return c.streamEvents, nil
+}
+
 // handleWebSocketMessages processes incoming WebSocket messages.
 func (c *Connector) handleWebSocketMessages() {
 	defer c.wg.Done()
@@ -365,14 +401,55 @@ func (c *Connector) handleWebSocketMessages() {
 		case <-c.ctx.Done():
 			return
 
-		case msg := <-c.ws.Messages():
+		case msg, ok := <-c.ws.Messages():
+			if !ok {
+				return
+			}
 			c.processWebSocketMessage(msg)
 		}
 	}
 }
 
+// handleWebSocketEvents forwards WebSocket lifecycle events to connector subscribers.
+func (c *Connector) handleWebSocketEvents() {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+
+		case event, ok := <-c.ws.Events():
+			if !ok {
+				return
+			}
+			c.processWebSocketEvent(event)
+		}
+	}
+}
+
+func (c *Connector) processWebSocketEvent(event *connector.StreamEvent) {
+	if event == nil {
+		return
+	}
+
+	select {
+	case c.streamEvents <- event:
+	case <-c.ctx.Done():
+	default:
+		c.logger.WithFields(logrus.Fields{
+			"type":   event.Type,
+			"reason": event.Reason,
+		}).Warn("Stream event channel full, dropping event")
+	}
+}
+
 // processWebSocketMessage routes WebSocket messages to appropriate channels.
 func (c *Connector) processWebSocketMessage(msg *WebSocketMessage) {
+	if msg == nil {
+		return
+	}
+
 	switch msg.Topic {
 	case "order":
 		c.processOrderUpdate(msg)
@@ -383,6 +460,10 @@ func (c *Connector) processWebSocketMessage(msg *WebSocketMessage) {
 	case "tickers":
 		c.processTickerUpdate(msg)
 	default:
+		if strings.HasPrefix(msg.Topic, "tickers.") {
+			c.processTickerUpdate(msg)
+			return
+		}
 		c.logger.WithField("topic", msg.Topic).Debug("Unhandled WebSocket message")
 	}
 }
@@ -390,12 +471,13 @@ func (c *Connector) processWebSocketMessage(msg *WebSocketMessage) {
 // processOrderUpdate converts WebSocket order message to domain update.
 func (c *Connector) processOrderUpdate(msg *WebSocketMessage) {
 	// Parse order data from message
-	orderData, ok := msg.Data.(map[string]interface{})
+	orderData, ok := firstMap(msg.Data)
 	if !ok {
 		c.logger.Error("Invalid order update data")
 		return
 	}
 
+	var err error
 	update := &connector.OrderUpdate{
 		ExchangeOrderID: getString(orderData, "orderId"),
 		ClientOrderID:   getString(orderData, "orderLinkId"),
@@ -403,9 +485,18 @@ func (c *Connector) processOrderUpdate(msg *WebSocketMessage) {
 		UpdatedAtUTC:    time.Now().UTC(),
 	}
 
-	update.FilledQty, _ = decimal.NewFromString(getString(orderData, "cumExecQty"))
-	update.RemainingQty, _ = decimal.NewFromString(getString(orderData, "leavesQty"))
-	update.AvgFillPrice, _ = decimal.NewFromString(getString(orderData, "avgPrice"))
+	if update.FilledQty, err = parseOptionalDecimal("cumExecQty", getString(orderData, "cumExecQty")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
+	if update.RemainingQty, err = parseOptionalDecimal("leavesQty", getString(orderData, "leavesQty")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
+	if update.AvgFillPrice, err = parseOptionalDecimal("avgPrice", getString(orderData, "avgPrice")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
 
 	select {
 	case c.orderUpdates <- update:
@@ -415,21 +506,31 @@ func (c *Connector) processOrderUpdate(msg *WebSocketMessage) {
 
 // processPositionUpdate converts WebSocket position message to domain update.
 func (c *Connector) processPositionUpdate(msg *WebSocketMessage) {
-	posData, ok := msg.Data.(map[string]interface{})
+	posData, ok := firstMap(msg.Data)
 	if !ok {
 		c.logger.Error("Invalid position update data")
 		return
 	}
 
+	var err error
 	update := &connector.PositionUpdate{
 		Symbol:       getString(posData, "symbol"),
 		Side:         unmapPositionSide(getString(posData, "side")),
 		UpdatedAtUTC: time.Now().UTC(),
 	}
 
-	update.Quantity, _ = decimal.NewFromString(getString(posData, "size"))
-	update.EntryPrice, _ = decimal.NewFromString(getString(posData, "avgPrice"))
-	update.UnrealizedPnL, _ = decimal.NewFromString(getString(posData, "unrealisedPnl"))
+	if update.Quantity, err = parseRequiredDecimal("size", getString(posData, "size")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
+	if update.EntryPrice, err = parseOptionalDecimal("avgPrice", getString(posData, "avgPrice")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
+	if update.UnrealizedPnL, err = parseOptionalDecimal("unrealisedPnl", getString(posData, "unrealisedPnl")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
 
 	select {
 	case c.positionUpdates <- update:
@@ -439,19 +540,26 @@ func (c *Connector) processPositionUpdate(msg *WebSocketMessage) {
 
 // processBalanceUpdate converts WebSocket balance message to domain update.
 func (c *Connector) processBalanceUpdate(msg *WebSocketMessage) {
-	balData, ok := msg.Data.(map[string]interface{})
+	balData, ok := firstMap(msg.Data)
 	if !ok {
 		c.logger.Error("Invalid balance update data")
 		return
 	}
 
+	var err error
 	update := &connector.BalanceUpdate{
 		Asset:        getString(balData, "coin"),
 		UpdatedAtUTC: time.Now().UTC(),
 	}
 
-	update.Total, _ = decimal.NewFromString(getString(balData, "walletBalance"))
-	update.Available, _ = decimal.NewFromString(getString(balData, "availableBalance"))
+	if update.Total, err = parseRequiredDecimal("walletBalance", getString(balData, "walletBalance")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
+	if update.Available, err = parseOptionalDecimal("availableBalance", getString(balData, "availableBalance")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
 	update.Locked = update.Total.Sub(update.Available)
 
 	select {
@@ -462,7 +570,7 @@ func (c *Connector) processBalanceUpdate(msg *WebSocketMessage) {
 
 // processTickerUpdate converts WebSocket ticker message to domain update.
 func (c *Connector) processTickerUpdate(msg *WebSocketMessage) {
-	tickerData, ok := msg.Data.(map[string]interface{})
+	tickerData, ok := firstMap(msg.Data)
 	if !ok {
 		c.logger.Error("Invalid ticker update data")
 		return
@@ -470,15 +578,28 @@ func (c *Connector) processTickerUpdate(msg *WebSocketMessage) {
 
 	symbol := getString(tickerData, "symbol")
 
+	var err error
 	update := &connector.TickerUpdate{
 		Symbol:       symbol,
 		UpdatedAtUTC: time.Now().UTC(),
 	}
 
-	update.LastPrice, _ = decimal.NewFromString(getString(tickerData, "lastPrice"))
-	update.BidPrice, _ = decimal.NewFromString(getString(tickerData, "bid1Price"))
-	update.AskPrice, _ = decimal.NewFromString(getString(tickerData, "ask1Price"))
-	update.Volume24h, _ = decimal.NewFromString(getString(tickerData, "volume24h"))
+	if update.LastPrice, err = parseRequiredDecimal("lastPrice", getString(tickerData, "lastPrice")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
+	if update.BidPrice, err = parseRequiredDecimal("bid1Price", getString(tickerData, "bid1Price")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
+	if update.AskPrice, err = parseRequiredDecimal("ask1Price", getString(tickerData, "ask1Price")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
+	if update.Volume24h, err = parseOptionalDecimal("volume24h", getString(tickerData, "volume24h")); err != nil {
+		c.dropMalformedStreamUpdate(msg.Topic, err)
+		return
+	}
 
 	c.mu.RLock()
 	ch, exists := c.tickerUpdates[symbol]
@@ -490,6 +611,30 @@ func (c *Connector) processTickerUpdate(msg *WebSocketMessage) {
 		case <-c.ctx.Done():
 		}
 	}
+}
+
+func firstMap(data interface{}) (map[string]interface{}, bool) {
+	if m, ok := data.(map[string]interface{}); ok {
+		return m, true
+	}
+
+	items, ok := data.([]interface{})
+	if !ok || len(items) == 0 {
+		return nil, false
+	}
+
+	m, ok := items[0].(map[string]interface{})
+	return m, ok
+}
+
+func (c *Connector) dropMalformedStreamUpdate(topic string, err error) {
+	c.logger.WithError(err).WithField("topic", topic).Warn("Dropping malformed stream update")
+	c.processWebSocketEvent(&connector.StreamEvent{
+		Type:          connector.StreamEventGap,
+		Source:        "bybit_ws_parse",
+		Reason:        err.Error(),
+		OccurredAtUTC: time.Now().UTC(),
+	})
 }
 
 // Helper function to safely extract string from map.
